@@ -1,0 +1,152 @@
+import asyncio
+import os
+from dotenv import load_dotenv
+
+from semantic_kernel import Kernel
+from semantic_kernel.agents import AgentGroupChat, ChatCompletionAgent
+from semantic_kernel.agents.strategies import (
+    KernelFunctionSelectionStrategy,
+    KernelFunctionTerminationStrategy,
+)
+from semantic_kernel.functions import KernelFunctionFromPrompt
+from semantic_kernel.contents import ChatHistoryTruncationReducer
+from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
+
+from azure.identity import DefaultAzureCredential
+from azure.ai.projects import AIProjectClient
+from azure.ai.projects.models import AzureAISearchTool
+
+# Load environment variables
+load_dotenv()
+
+REVIEWER_NAME = "Reviewer"
+WRITER_NAME = "Writer"
+
+# Reviewer Agent (Azure AI Project-based)
+def create_reviewer_agent():
+    credential = DefaultAzureCredential()
+    conn_str = os.getenv("AZURE_PROJECT_CONNECTION_STRING")
+    index_name = os.getenv("AZURE_INDEX_NAME")
+    model = os.getenv("AZURE_MODEL_NAME")
+    agent_name = os.getenv("AZURE_AGENT_NAME")
+    instructions = os.getenv("AZURE_REVIEWER_INSTRUCTIONS")
+
+    project_client = AIProjectClient.from_connection_string(
+        credential=credential,
+        conn_str=conn_str
+    )
+
+    conn_list = project_client.connections._list_connections()["value"]
+    conn_id = next(
+        (conn["id"] for conn in conn_list if conn["properties"].get("metadata", {}).get("type", "").upper() == "AZURE_AI_SEARCH"),
+        None
+    )
+
+    ai_search_tool = AzureAISearchTool(
+        index_connection_id=conn_id,
+        index_name=index_name,
+        query_type="Hybrid"
+    )
+
+    agent = project_client.agents.create_agent(
+        model=model,
+        name=agent_name,
+        instructions=instructions,
+        tools=ai_search_tool.definitions,
+        tool_resources=ai_search_tool.resources
+    )
+
+    return agent
+
+
+# Writer Agent (ChatCompletionAgent from Semantic Kernel)
+def create_writer_agent(kernel: Kernel) -> ChatCompletionAgent:
+    return ChatCompletionAgent(
+        kernel=kernel,
+        name=WRITER_NAME,
+        instructions="""
+Your sole responsibility is to rewrite content according to review suggestions.
+- Always apply all review directions.
+- Always revise the content in its entirety without explanation.
+- Never address the user.
+"""
+    )
+
+
+def create_kernel() -> Kernel:
+    kernel = Kernel()
+    kernel.add_service(AzureChatCompletion())
+    return kernel
+
+
+async def main():
+    kernel = create_kernel()
+    agent_reviewer = create_reviewer_agent()
+    agent_writer = create_writer_agent(kernel)
+
+    selection_function = KernelFunctionFromPrompt(
+        function_name="selection",
+        prompt=f"""
+Examine the provided RESPONSE and choose the next participant.
+State only the name of the chosen participant without explanation.
+Never choose the participant named in the RESPONSE.
+
+Choose only from these participants:
+- {REVIEWER_NAME}
+- {WRITER_NAME}
+
+Rules:
+- If RESPONSE is user input, it is {REVIEWER_NAME}'s turn.
+- If RESPONSE is by {REVIEWER_NAME}, it is {WRITER_NAME}'s turn.
+- If RESPONSE is by {WRITER_NAME}, it is {REVIEWER_NAME}'s turn.
+
+RESPONSE:
+{{{{$lastmessage}}}}"""
+    )
+
+    termination_function = KernelFunctionFromPrompt(
+        function_name="termination",
+        prompt=f"""
+If the response indicates task completion, reply only with 'yes'.
+If there are still suggestions, reply anything else.
+
+RESPONSE:
+{{{{$lastmessage}}}}"""
+    )
+
+    chat = AgentGroupChat(
+        agents=[agent_reviewer, agent_writer],
+        selection_strategy=KernelFunctionSelectionStrategy(
+            initial_agent=agent_reviewer,
+            function=selection_function,
+            kernel=kernel,
+            result_parser=lambda result: str(result.value[0]).strip() if result.value[0] else WRITER_NAME,
+            history_variable_name="lastmessage",
+            history_reducer=ChatHistoryTruncationReducer(target_count=1),
+        ),
+        termination_strategy=KernelFunctionTerminationStrategy(
+            agents=[agent_reviewer],
+            function=termination_function,
+            kernel=kernel,
+            result_parser=lambda result: "yes" in str(result.value[0]).lower(),
+            history_variable_name="lastmessage",
+            maximum_iterations=10,
+            history_reducer=ChatHistoryTruncationReducer(target_count=1),
+        ),
+    )
+
+    print("Ready! Type your input, or 'exit' to quit.")
+    while True:
+        user_input = input("User > ").strip()
+        if user_input.lower() == "exit":
+            break
+
+        await chat.add_chat_message(message=user_input)
+
+        async for response in chat.invoke():
+            if response:
+                print(f"\n# {response.name.upper()}:\n{response.content}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
