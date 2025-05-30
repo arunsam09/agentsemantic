@@ -1,0 +1,162 @@
+import os
+import logging
+from typing import Optional
+from dataclasses import dataclass
+import asyncio
+
+from azure.identity import DefaultAzureCredential
+from azure.ai.projects.aio import AIProjectClient
+from semantic_kernel import Kernel
+from semantic_kernel.functions import KernelFunctionFromPrompt, FunctionResult
+from semantic_kernel.agents import AzureAIAgent, AgentGroupChat
+from semantic_kernel.connectors.ai.azure_ai_inference import AzureAIInferenceChatCompletion
+from semantic_kernel.agents.strategies import (
+    KernelFunctionSelectionStrategy,
+    KernelFunctionTerminationStrategy
+)
+
+# ----------------------------
+# Logging setup
+# ----------------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("GroupChat")
+
+# ----------------------------
+# Response structure
+# ----------------------------
+@dataclass
+class PizzaResponse:
+    message: str
+    status: str
+
+# ----------------------------
+# Group chat agent class
+# ----------------------------
+class MinimalGroupChatAgent:
+    def __init__(self, project_client: AIProjectClient, agent_group: AgentGroupChat):
+        self.project_client = project_client
+        self.agent_group = agent_group
+
+    @classmethod
+    async def create(cls) -> "MinimalGroupChatAgent":
+        logger.info("Initializing Azure credentials and project client...")
+
+        credential = DefaultAzureCredential()
+
+        # Read environment variables with error handling
+        try:
+            conn_str = os.environ["PROJECT_CONNECTION_STRING"]
+            domain_id = os.environ["DOMAIN_AGENT_ID"]
+            summarizer_id = os.environ["SUMMARIZER_AGENT_ID"]
+        except KeyError as e:
+            logger.error(f"Missing environment variable: {e}")
+            raise
+
+        project_client = AIProjectClient.from_connection_string(
+            credential=credential,
+            conn_str=conn_str
+        )
+
+        # Load and initialize agents
+        logger.info("Loading agent definitions from Azure...")
+        domain_def = await project_client.agents.get_agent(agent_id=domain_id)
+        summarizer_def = await project_client.agents.get_agent(agent_id=summarizer_id)
+
+        domain_agent_name = "DomainAgent"
+        summarizer_agent_name = "SummarizerAgent"
+
+        domain_agent = AzureAIAgent(client=project_client, definition=domain_def, name=domain_agent_name)
+        summarizer_agent = AzureAIAgent(client=project_client, definition=summarizer_def, name=summarizer_agent_name)
+
+        # Kernel setup
+        kernel = Kernel()
+        kernel.add_service(AzureAIInferenceChatCompletion(ai_model_id="gpt-4o"))
+
+        # Selection strategy: who talks next
+        selection_prompt = f"""
+        You are a conversation router.
+
+        - Start with '{domain_agent_name}'.
+        - Then '{summarizer_agent_name}' must follow.
+        - Only allow one turn each in that order.
+
+        History:
+        {{{{ $history }}}}
+        """
+
+        def parse_selection_result(result: FunctionResult) -> str:
+            return result.value[0].content.strip()
+
+        selection_strategy = KernelFunctionSelectionStrategy(
+            function=KernelFunctionFromPrompt("select_agent", prompt=selection_prompt),
+            kernel=kernel,
+            agent_variable_name="agents",
+            history_variable_name="history",
+            result_parser=parse_selection_result,
+        )
+
+        # Termination strategy: when to stop
+        termination_prompt = f"""
+        If the last message is from '{summarizer_agent_name}', respond with 'yes' to end the chat.
+        Otherwise, say 'no'.
+
+        History:
+        {{{{ $history }}}}
+        """
+
+        termination_strategy = KernelFunctionTerminationStrategy(
+            maximum_iterations=2,
+            function=KernelFunctionFromPrompt("check_end", prompt=termination_prompt),
+            kernel=kernel,
+            agent_variable_name="agents",
+            history_variable_name="history",
+            agents=[summarizer_agent],
+            result_parser=lambda result: result.value[0].content.strip().lower() == "yes",
+        )
+
+        # Group chat
+        chat = AgentGroupChat(
+            agents=[domain_agent, summarizer_agent],
+            selection_strategy=selection_strategy,
+            termination_strategy=termination_strategy,
+        )
+
+        logger.info("Agent group chat initialized.")
+        return cls(project_client=project_client, agent_group=chat)
+
+    async def process_message(self, message: str, thread_id: Optional[str] = None) -> PizzaResponse:
+        logger.info(f"Processing user message: {message}")
+        await self.agent_group.add_chat_message(message=message)
+
+        async for response in self.agent_group.invoke():
+            logger.info(f"Agent: {response}")
+
+        # Take final meaningful response
+        final_message = self.agent_group.history.messages[-1].content
+        return PizzaResponse(message=final_message, status="success")
+
+# ----------------------------
+# Main function for test/demo
+# ----------------------------
+async def main():
+    try:
+        # Instantiate and use the group chat agent
+        agent = await MinimalGroupChatAgent.create()
+
+        # Test input
+        user_input = "What’s special about Roman-style pizza dough?"
+        response = await agent.process_message(user_input)
+
+        print("\n--- Final Output ---")
+        print("Status:", response.status)
+        print("Message:", response.message)
+        print("--------------------\n")
+
+    except Exception as e:
+        logger.error(f"Error occurred: {e}")
+
+# ----------------------------
+# Run
+# ----------------------------
+if __name__ == "__main__":
+    asyncio.run(main())
