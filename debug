@@ -2,20 +2,19 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Python: Flask",
+      "name": "Python: FastAPI (Uvicorn)",
       "type": "python",
       "request": "launch",
-      "module": "flask",
-      "env": {
-        "FLASK_APP": "api.py",         // 🟢 Your main Flask file here
-        "FLASK_ENV": "development"
-      },
+      "module": "uvicorn",
       "args": [
-        "run",
-        "--no-debugger",
-        "--no-reload"
+        "app.api:app",       // ✅ Replace with your actual module path
+        "--host", "0.0.0.0",
+        "--port", "8000",
+        "--reload"
       ],
-      "jinja": true
+      "jinja": true,
+      "console": "integratedTerminal",
+      "justMyCode": true
     }
   ]
 }
