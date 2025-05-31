@@ -18,3 +18,22 @@
     }
   ]
 }
+
+
+
+
+async def process_message(self, message: str, thread_id: Optional[str] = None) -> ReviewResponse:
+    await self.agent_group.add_chat_message(message=message)
+    responses = []
+
+    # Collect all responses
+    raw_responses = [r async for r in self.agent_group.invoke()]
+
+    # Pair them with agent names if possible
+    for i, response in enumerate(raw_responses):
+        # Fallback to "Unknown" if something goes out of index
+        agent_name = self.agent_group.agents[i].name if i < len(self.agent_group.agents) else "Unknown"
+        responses.append(AgentMessage(agent=agent_name, message=response.content))
+
+    final_message = self.agent_group.history.messages[-1].content
+    return ReviewResponse(message=final_message, status="success", all_responses=responses)
