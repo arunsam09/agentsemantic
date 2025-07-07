@@ -1,0 +1,118 @@
+import logging
+from uuid import UUID, uuid4
+
+from fastapi import FastAPI, Request, Response, HTTPException, Depends
+from fastapi_sessions.backends.implementations import InMemoryBackend
+from fastapi_sessions.frontends.implementations import SessionCookie, CookieParameters
+from fastapi_sessions.session_verifier import SessionVerifier
+from pydantic import BaseModel
+from typing import Dict
+
+from app.agents.reviewer_agent import ReviewerAgent
+from app.models import ReviewRequest, ReviewResponse
+
+# -------------------------------
+# Setup logging
+# -------------------------------
+logger = logging.getLogger("ReviewerAPI")
+logging.basicConfig(level=logging.INFO)
+
+# -------------------------------
+# Initialize FastAPI app
+# -------------------------------
+app = FastAPI()
+
+# -------------------------------
+# Session configuration
+# -------------------------------
+class SessionData(BaseModel):
+    thread_id: str
+
+cookie_params = CookieParameters()
+
+# Secret key must be kept safe
+SECRET_KEY = "CHANGE_THIS_SECRET_KEY"
+
+cookie = SessionCookie(
+    cookie_name="session",
+    identifier="reviewer_verifier",
+    auto_error=True,
+    secret_key=SECRET_KEY,
+    cookie_params=cookie_params,
+)
+
+# In-memory backend to store session data
+backend = InMemoryBackend[UUID, SessionData]()
+
+class ReviewerSessionVerifier(SessionVerifier[UUID, SessionData]):
+    def __init__(self):
+        super().__init__(
+            identifier="reviewer_verifier",
+            auto_error=True,
+            backend=backend,
+            auth_http_exception=HTTPException(status_code=403, detail="Invalid session"),
+        )
+
+    def verify_session(self, data: SessionData) -> bool:
+        return True  # You can add extra validation here
+
+verifier = ReviewerSessionVerifier()
+
+# -------------------------------
+# In-memory store for agents
+# -------------------------------
+agent_sessions: Dict[UUID, ReviewerAgent] = {}
+
+# -------------------------------
+# Create a session
+# -------------------------------
+@app.post("/create_session/{thread_id}")
+async def create_session(thread_id: str, response: Response):
+    session_id = uuid4()
+    session_data = SessionData(thread_id=thread_id)
+
+    await backend.create(session_id, session_data)
+    cookie.attach_to_response(response, session_id)
+
+    # Initialize ReviewerAgent for this session
+    agent = await ReviewerAgent.create()
+    agent_sessions[session_id] = agent
+
+    logger.info(f"Session {session_id} created for thread {thread_id}")
+    return {"message": f"Session created with thread ID {thread_id}"}
+
+# -------------------------------
+# Use the session in /review
+# -------------------------------
+@app.post("/review", response_model=ReviewResponse, dependencies=[Depends(cookie)])
+async def review(
+    request_data: ReviewRequest,
+    session_data: SessionData = Depends(verifier),
+    session_id: UUID = Depends(cookie),
+):
+    agent = agent_sessions.get(session_id)
+
+    if not agent:
+        # Agent may have been lost; recreate
+        logger.warning(f"No agent found for session {session_id}, creating new one.")
+        agent = await ReviewerAgent.create()
+        agent_sessions[session_id] = agent
+
+    try:
+        result = await agent.process_message(request_data.message, session_data.thread_id)
+        return result
+    except Exception as e:
+        logger.error(f"Error during review: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+# -------------------------------
+# Delete the session (logout)
+# -------------------------------
+@app.post("/delete_session")
+async def delete_session(response: Response, session_id: UUID = Depends(cookie)):
+    await backend.delete(session_id)
+    agent_sessions.pop(session_id, None)
+    cookie.delete_from_response(response)
+
+    logger.info(f"Session {session_id} deleted")
+    return {"message": "Session deleted successfully"}
