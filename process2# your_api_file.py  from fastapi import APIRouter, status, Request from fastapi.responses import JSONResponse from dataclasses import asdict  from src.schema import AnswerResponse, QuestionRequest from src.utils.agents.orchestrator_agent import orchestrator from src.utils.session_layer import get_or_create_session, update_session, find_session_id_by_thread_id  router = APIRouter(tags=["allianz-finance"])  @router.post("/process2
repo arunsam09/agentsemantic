@@ -1,0 +1,62 @@
+# your_api_file.py
+
+from fastapi import APIRouter, status, Request
+from fastapi.responses import JSONResponse
+from dataclasses import asdict
+
+from src.schema import AnswerResponse, QuestionRequest
+from src.utils.agents.orchestrator_agent import orchestrator
+from src.utils.session_layer import get_or_create_session, update_session, find_session_id_by_thread_id
+
+router = APIRouter(tags=["allianz-finance"])
+
+@router.post("/ask", response_model=AnswerResponse, status_code=status.HTTP_200_OK)
+async def review(request: QuestionRequest, req: Request):
+    session_id, thread_id = get_or_create_session(req)
+    print("Thread ID being used:", thread_id)
+
+    agent = await orchestrator.create()
+    result = await agent.process_message(request.message, thread_id)
+
+    update_session(session_id, result.thread_id)
+
+
+    # src/utils/session_layer.py
+
+import uuid
+from fastapi import Request
+
+# In-memory session store. You can replace this with Redis or DB later.
+session_store = {}
+
+def get_or_create_session(request: Request):
+    session_id = request.cookies.get("session_id")
+
+    if session_id is None or session_id not in session_store:
+        session_id = str(uuid.uuid4())
+        thread_id = None
+        session_store[session_id] = {"thread_id": thread_id}
+    else:
+        thread_id = session_store[session_id]["thread_id"]
+        print("Existing thread ID found:", thread_id)
+
+    return session_id, thread_id
+
+def update_session(session_id: str, thread_id: str):
+    session_store[session_id] = {"thread_id": thread_id}
+
+def find_session_id_by_thread_id(thread_id: str) -> str | None:
+    for key, value in session_store.items():
+        if value["thread_id"] == thread_id:
+            return key
+    return None
+
+    response = JSONResponse(content=asdict(result))
+    response.set_cookie(key="session_id", value=session_id, httponly=False, secure=False)
+
+    if not req.cookies.get("session_id"):
+        matched_session = find_session_id_by_thread_id(result.thread_id)
+        if matched_session:
+            response.set_cookie(key="session_id", value=matched_session, httponly=False, secure=False)
+
+    return response
