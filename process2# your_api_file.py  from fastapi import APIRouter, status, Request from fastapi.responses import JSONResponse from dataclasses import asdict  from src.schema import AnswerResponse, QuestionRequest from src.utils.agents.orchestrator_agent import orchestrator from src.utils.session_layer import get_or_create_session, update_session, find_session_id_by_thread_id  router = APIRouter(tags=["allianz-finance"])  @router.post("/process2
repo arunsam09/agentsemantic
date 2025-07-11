@@ -60,3 +60,81 @@ def find_session_id_by_thread_id(thread_id: str) -> str | None:
             response.set_cookie(key="session_id", value=matched_session, httponly=False, secure=False)
 
     return response
+
+# src/session_model.py
+from pydantic import BaseModel
+from typing import Optional
+
+class SessionData(BaseModel):
+    thread_id: Optional[str] = None
+
+
+# src/session_backend.py
+from uuid import UUID, uuid4
+from datetime import timedelta
+from fastapi_sessions.backends.in_memory import InMemoryBackend
+from fastapi_sessions.frontends.implementations import SessionCookie
+from fastapi_sessions.session_verifier import SessionVerifier
+
+from src.session_model import SessionData
+
+# In-memory session backend
+backend = InMemoryBackend[UUID, SessionData](expire_after=timedelta(hours=1))
+
+# Cookie-based session frontend
+cookie = SessionCookie(
+    cookie_name="session_id",
+    identifier=lambda: uuid4(),
+    auto_error=False
+)
+
+# Session verifier class
+class BasicSessionVerifier(SessionVerifier[UUID, SessionData]):
+    def __init__(self):
+        super().__init__(identifier=lambda: uuid4(), auto_error=False)
+
+    async def verify_session(self, session_data: SessionData) -> bool:
+        return True  # Always trust session if found
+
+verifier = BasicSessionVerifier()
+
+
+
+
+
+
+# your_api_file.py
+from uuid import UUID
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
+from dataclasses import asdict
+
+from src.schema import AnswerResponse, QuestionRequest
+from src.utils.agents.orchestrator_agent import orchestrator
+from src.session_model import SessionData
+from src.session_backend import backend, cookie, verifier
+
+router = APIRouter(tags=["allianz-finance"])
+
+@router.post("/ask", response_model=AnswerResponse)
+async def review(
+    request: QuestionRequest,
+    session_id: UUID = Depends(cookie),
+    session_data: SessionData = Depends(verifier)
+):
+    # First-time visitor: create session manually
+    if session_id not in backend.sessions:
+        session_data = SessionData(thread_id=None)
+        await backend.create(session_id, session_data)
+
+    # Use thread_id from session
+    thread_id = session_data.thread_id
+
+    agent = await orchestrator.create()
+    result = await agent.process_message(request.message, thread_id)
+
+    # Update session data
+    session_data.thread_id = result.thread_id
+    await backend.update(session_id, session_data)
+
+    return JSONResponse(content=asdict(result))
