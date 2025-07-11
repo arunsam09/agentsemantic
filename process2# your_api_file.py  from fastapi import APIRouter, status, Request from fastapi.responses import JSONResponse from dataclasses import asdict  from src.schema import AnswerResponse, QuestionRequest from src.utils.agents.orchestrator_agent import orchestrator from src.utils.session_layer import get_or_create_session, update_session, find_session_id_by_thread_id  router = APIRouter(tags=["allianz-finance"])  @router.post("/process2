@@ -185,3 +185,38 @@ class BasicSessionVerifier(SessionVerifier[UUID, SessionData]):
 
 # Verifier instance
 verifier = BasicSessionVerifier()
+
+
+
+
+from uuid import UUID, uuid4
+from datetime import timedelta
+from fastapi_sessions.backends.in_memory import InMemoryBackend, InMemoryVerifier
+from fastapi_sessions.frontends.implementations import SessionCookie
+
+from src.session_model import SessionData
+
+# In-memory session backend
+backend = InMemoryBackend[UUID, SessionData](expire_after=timedelta(hours=1))
+
+# Cookie frontend
+cookie = SessionCookie(
+    cookie_name="session_id",
+    identifier=lambda: uuid4(),
+    auto_error=False
+)
+
+# ✅ Use the correct verifier for in-memory backend
+class BasicSessionVerifier(InMemoryVerifier[UUID, SessionData]):
+    def __init__(self):
+        super().__init__(
+            identifier=lambda: uuid4(),
+            backend=backend,
+            auto_error=False,
+        )
+
+    async def verify_session(self, session_data: SessionData) -> bool:
+        return True
+
+# Verifier instance
+verifier = BasicSessionVerifier()
