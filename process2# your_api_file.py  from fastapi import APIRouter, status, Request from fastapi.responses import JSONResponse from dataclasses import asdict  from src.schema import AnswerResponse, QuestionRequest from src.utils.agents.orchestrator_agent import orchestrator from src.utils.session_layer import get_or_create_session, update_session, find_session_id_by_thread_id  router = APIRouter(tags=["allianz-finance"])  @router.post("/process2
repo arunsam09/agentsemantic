@@ -21,6 +21,10 @@ async def review(request: QuestionRequest, req: Request):
     update_session(session_id, result.thread_id)
 
 
+
+
+
+
     # src/utils/session_layer.py
 
 import uuid
@@ -138,3 +142,46 @@ async def review(
     await backend.update(session_id, session_data)
 
     return JSONResponse(content=asdict(result))
+
+
+
+
+
+
+
+
+
+
+
+from uuid import UUID, uuid4
+from datetime import timedelta
+from fastapi_sessions.backends.in_memory import InMemoryBackend
+from fastapi_sessions.frontends.implementations import SessionCookie
+from fastapi_sessions.session_verifier import SessionVerifier
+
+from src.session_model import SessionData
+
+# In-memory session backend
+backend = InMemoryBackend[UUID, SessionData](expire_after=timedelta(hours=1))
+
+# Cookie-based session frontend
+cookie = SessionCookie(
+    cookie_name="session_id",
+    identifier=lambda: uuid4(),
+    auto_error=False
+)
+
+# ✅ Fixed: Session verifier class
+class BasicSessionVerifier(SessionVerifier[UUID, SessionData]):
+    def __init__(self):
+        super().__init__(
+            identifier=lambda: uuid4(),
+            backend=backend,              # ✅ Required argument
+            auto_error=False
+        )
+
+    async def verify_session(self, session_data: SessionData) -> bool:
+        return True  # ✅ Always trust session (or add logic here)
+
+# Verifier instance
+verifier = BasicSessionVerifier()
