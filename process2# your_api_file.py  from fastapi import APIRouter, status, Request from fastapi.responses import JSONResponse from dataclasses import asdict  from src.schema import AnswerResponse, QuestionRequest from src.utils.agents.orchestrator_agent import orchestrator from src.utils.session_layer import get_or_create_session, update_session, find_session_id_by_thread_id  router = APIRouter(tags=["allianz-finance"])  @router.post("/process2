@@ -24,6 +24,40 @@ async def review(request: QuestionRequest, req: Request):
 
 
 
+# 1. Create in-memory backend with TTL
+backend = InMemoryBackend[UUID, SessionData]()
+backend.expire_after = timedelta(hours=1)
+
+# 2. Cookie frontend for session ID tracking
+cookie_params = CookieParameters(
+    name="session_id",
+    path="/",
+    secure=False,    # set to True if using HTTPS
+    httponly=True,
+    samesite="lax",
+)
+
+cookie = SessionCookie(
+    cookie_params=cookie_params,
+    secret_key="super-secret-key",  # replace with an environment variable in production
+    identifier=lambda: uuid4(),     # callable that generates UUID session IDs
+    auto_error=False,
+)
+
+# 3. SessionVerifier subclass with correct super() signature
+class BasicSessionVerifier(SessionVerifier[UUID, SessionData]):
+    def __init__(self):
+        super().__init__(
+            identifier=cookie.identifier,
+            backend=backend,
+            auto_error=False
+        )
+
+    def verify_session(self, session_data: SessionData) -> bool:
+        # You can add validation logic here, like expiration
+        return True
+
+verifier = BasicSessionVerifier()
 
     # src/utils/session_layer.py
 
@@ -144,6 +178,40 @@ async def review(
     return JSONResponse(content=asdict(result))
 
 
+# 1. Create in-memory backend with TTL
+backend = InMemoryBackend[UUID, SessionData]()
+backend.expire_after = timedelta(hours=1)
+
+# 2. Cookie frontend for session ID tracking
+cookie_params = CookieParameters(
+    name="session_id",
+    path="/",
+    secure=False,    # set to True if using HTTPS
+    httponly=True,
+    samesite="lax",
+)
+
+cookie = SessionCookie(
+    cookie_params=cookie_params,
+    secret_key="super-secret-key",  # replace with an environment variable in production
+    identifier=lambda: uuid4(),     # callable that generates UUID session IDs
+    auto_error=False,
+)
+
+# 3. SessionVerifier subclass with correct super() signature
+class BasicSessionVerifier(SessionVerifier[UUID, SessionData]):
+    def __init__(self):
+        super().__init__(
+            identifier=cookie.identifier,
+            backend=backend,
+            auto_error=False
+        )
+
+    def verify_session(self, session_data: SessionData) -> bool:
+        # You can add validation logic here, like expiration
+        return True
+
+verifier = BasicSessionVerifier()
 
 
 
