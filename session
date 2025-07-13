@@ -302,3 +302,36 @@ class BasicVerifier(SessionVerifier[UUID, SessionData]):
         return True
 
 verifier = BasicVerifier()
+
+
+
+
+rom fastapi import APIRouter, Depends, Response, status
+from fastapi.responses import JSONResponse
+from uuid import UUID
+from dataclasses import asdict
+
+from src.schema import QuestionRequest, AnswerResponse
+from src.utils.agents.orchestrator_agent import orchestrator
+from src.utils.session_layer import cookie, verifier, backend, SessionData
+
+router = APIRouter(tags=["allianz-finance"])
+
+@router.post("/ask", response_model=AnswerResponse, status_code=status.HTTP_200_OK)
+async def ask(
+    req_body: QuestionRequest,
+    response: Response,
+    session_id: UUID = Depends(cookie),
+    session_data: SessionData = Depends(verifier)
+):
+    thread_id = session_data.thread_id
+
+    agent = await orchestrator.create()
+    result = await agent.process_message(req_body.message, thread_id)
+
+    session_data.thread_id = result.thread_id
+    await backend.create(session_id, session_data)
+
+    cookie.attach_to_response(response, session_id)
+
+    return JSONResponse(content=asdict(result))
