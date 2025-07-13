@@ -1,0 +1,69 @@
+# src/utils/session_layer.py
+
+from typing import Optional
+from uuid import UUID
+from pydantic import BaseModel
+from fastapi import HTTPException
+from fastapi_sessions import SessionCookie, SessionInfo
+from fastapi_sessions.backends import InMemoryBackend
+
+# ✅ 1. Define session data schema
+class SessionData(BaseModel):
+    thread_id: Optional[str] = None
+
+# ✅ 2. Create cookie frontend
+cookie = SessionCookie(
+    name="session_id",
+    secret_key="YOUR_SECRET_KEY",        # choose a strong secret
+    backend=InMemoryBackend[UUID, SessionData](),
+    data_model=SessionData,
+    scheme_name="Session Cookie",
+    auto_error=False,
+)
+
+# ✅ 3. (Optional) Verifier is built-in in this interface
+
+
+
+
+from uuid import uuid4
+from fastapi import APIRouter, status, Request, Response, Depends, HTTPException
+from fastapi.responses import JSONResponse
+from dataclasses import asdict
+
+from src.schema import QuestionRequest, AnswerResponse
+from src.utils.agents.orchestrator_agent import orchestrator
+from src.utils.session_layer import cookie, SessionData, SessionInfo
+
+router = APIRouter(tags=["allianz-finance"])
+
+@router.post("/ask", response_model=AnswerResponse, status_code=status.HTTP_200_OK)
+async def ask(
+    req: Request,
+    req_body: QuestionRequest,
+    response: Response,
+    session_info: SessionInfo[SessionData] = Depends(cookie)
+):
+    # ✅ If there's no session yet, create one
+    if session_info is None:
+        new_session_id = uuid4()
+        session_data = SessionData(thread_id=None)
+        await cookie.create_session(session_data, response, old_session_id=None)
+        thread_id = None
+    else:
+        session_id, session_data = session_info
+        thread_id = session_data.thread_id
+        new_session_id = session_id
+
+    # ✅ Process message
+    agent = await orchestrator.create()
+    result = await agent.process_message(req_body.message, thread_id)
+
+    # ✅ Save updated thread ID
+    session_data.thread_id = result.thread_id
+    await cookie.create_session(session_data, response, old_session_id=new_session_id)
+
+    # ✅ Return response with cookie set
+    resp = JSONResponse(content=asdict(result), status_code=status.HTTP_200_OK)
+    cookie.attach_to_response(resp, new_session_id)
+    return resp
