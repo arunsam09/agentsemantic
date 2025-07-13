@@ -204,3 +204,46 @@ class BasicVerifier(SessionVerifier[UUID, SessionData]):
         return True
 
 verifier = BasicVerifier(identifier="my-session-verifier")
+
+from typing import Optional
+from uuid import UUID
+from pydantic import BaseModel
+from fastapi import HTTPException
+from fastapi_sessions.backends.implementations import InMemoryBackend
+from fastapi_sessions.frontends.implementations import SessionCookie, CookieParameters
+from fastapi_sessions.session_verifier import SessionVerifier
+
+# 1. Define session data schema
+class SessionData(BaseModel):
+    thread_id: Optional[str] = None
+
+# 2. Cookie frontend
+cookie_params = CookieParameters()
+cookie = SessionCookie(
+    cookie_name="session_id",
+    secret_key="SUPER_SECRET_KEY",  # Use a secure key
+    identifier="general_verifier",
+    cookie_params=cookie_params,
+    auto_error=False
+)
+
+# 3. In-memory backend
+backend = InMemoryBackend[UUID, SessionData]()
+
+# 4. Session Verifier
+class BasicVerifier(SessionVerifier[UUID, SessionData]):
+    def __init__(self):
+        super().__init__(
+            identifier="general_verifier",  # MUST match cookie.identifier
+            backend=backend,
+            auto_error=True,
+            auth_http_exception=HTTPException(status_code=403, detail="Invalid session")
+        )
+
+    async def verify_session(self, session_data: SessionData) -> bool:
+        # Return True to accept session
+        return True
+
+# 5. Create an instance of the verifier
+verifier = BasicVerifier()
+
