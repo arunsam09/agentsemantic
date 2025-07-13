@@ -67,3 +67,101 @@ async def ask(
     resp = JSONResponse(content=asdict(result), status_code=status.HTTP_200_OK)
     cookie.attach_to_response(resp, new_session_id)
     return resp
+
+
+
+
+
+
+
+
+
+
+
+
+
+from typing import Optional
+from uuid import UUID, uuid4
+from pydantic import BaseModel
+from fastapi import HTTPException
+from fastapi_sessions.frontends.implementations import SessionCookie, CookieParameters
+from fastapi_sessions.backends.implementations import InMemoryBackend
+from fastapi_sessions.session_verifier import SessionVerifier
+
+# 1. Define the session data schema
+class SessionData(BaseModel):
+    thread_id: Optional[str] = None
+
+# 2. Create cookie frontend
+cookie_params = CookieParameters()
+cookie = SessionCookie(
+    cookie_name="session_id",
+    identifier="general_verifier",  # connects cookie verifier pair
+    secret_key="CHANGE_THIS_TO_A_SECURE_RANDOM_KEY",
+    cookie_params=cookie_params,
+    auto_error=False,
+)
+
+# 3. Setup backend
+backend = InMemoryBackend[UUID, SessionData]()
+
+# 4. Create a session verifier
+class BasicVerifier(SessionVerifier[UUID, SessionData]):
+    def __init__(self):
+        super().__init__(
+            identifier="general_verifier",
+            auto_error=True,
+            backend=backend,
+            auth_http_exception=HTTPException(status_code=403, detail="Invalid session"),
+        )
+
+    def verify_session(self, data: SessionData) -> bool:
+        # Simple pass-through validator
+        return True
+
+verifier = BasicVerifier()
+
+
+
+from uuid import uuid4
+from fastapi import APIRouter, Depends, Response, HTTPException
+from fastapi.responses import JSONResponse
+from dataclasses import asdict
+from src.schema import QuestionRequest, AnswerResponse
+from src.utils.agents.orchestrator_agent import orchestrator
+from src.utils.session_layer import cookie, backend, verifier, SessionData
+
+router = APIRouter(tags=["allianz-finance"])
+
+@router.post("/ask", response_model=AnswerResponse)
+async def ask(
+    req_body: QuestionRequest,
+    response: Response,
+    session_id: UUID = Depends(cookie),           # Read/Create session_id from cookie
+    session_data: SessionData = Depends(verifier) # Validate and load data
+):
+    # Determine if it's a new session
+    thread_id = session_data.thread_id
+
+    # Process the user's question using the orchestrator agent
+    agent = await orchestrator.create()
+    result = await agent.process_message(req_body.message, thread_id)
+
+    # Update session data and store it
+    session_data.thread_id = result.thread_id
+    await backend.create(session_id, session_data)
+
+    # Attach updated session cookie
+    cookie.attach_to_response(response, session_id)
+
+    return JSONResponse(content=asdict(result))
+
+@router.post("/logout")
+async def logout(response: Response, session_id: UUID = Depends(cookie)):
+    # Delete session from backend and clear the cookie
+    await backend.delete(session_id)
+    cookie.delete_from_response(response)
+    return {"detail": "Logged out successfully"}
+
+
+
