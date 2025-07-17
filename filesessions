@@ -424,4 +424,37 @@ async def delete_session(response: Response, session_id: UUID = Depends(cookie))
     logger.info(f"Session deleted: {session_id}")
     return {"message": "Session deleted"}
 
+from fastapi import APIRouter, Request, status, Depends
+from fastapi.responses import JSONResponse
+from app.models import QuestionRequest, AnswerResponse
+from app.utils.orchestrator import ReviewerAgent
+from src.utils.session_layer import verifier, SessionData
+
+router = APIRouter(tags=["allianz-finance"])
+
+@router.post("/ask", response_model=AnswerResponse, status_code=status.HTTP_200_OK)
+async def ask(
+    request: Request,
+    input_data: QuestionRequest,
+    session_info = Depends(verifier)
+):
+    # ⏪ Load the shared orchestrator
+    agent: ReviewerAgent = request.app.state.orchestrator
+
+    # ⏪ Load session history if available
+    session_id, session_data = session_info
+    previous_history = session_data.history or []
+
+    # 🤖 Process message
+    result = await agent.process_message(
+        message=input_data.message,
+        previous_history=previous_history
+    )
+
+    # 💾 Save updated history to session
+    session_data.history = result.history
+    await verifier.backend.update(session_id, session_data)
+
+    # 📤 Return updated response
+    return JSONResponse(content=result.model_dump())
 
