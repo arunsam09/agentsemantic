@@ -458,3 +458,77 @@ async def ask(
     # 📤 Return updated response
     return JSONResponse(content=result.model_dump())
 
+import os
+from typing import Optional, List
+from dataclasses import dataclass
+from azure.identity.aio import DefaultAzureCredential
+from azure.ai.projects.aio import AIProjectClient
+from semantic_kernel.agents import AzureAIAgent, AgentGroupChat
+from semantic_kernel.connectors.ai.chat_completion_client_base import ChatMessage
+from .strategy_setup import build_selection_strategy, build_termination_strategy
+from app.utils.kernel import get_kernel
+from app.models import ReviewResponse, AgentMessage
+
+@dataclass
+class ReviewerAgent:
+    project_client: AIProjectClient
+    agent_group: AgentGroupChat
+
+    @classmethod
+    async def create(cls) -> "ReviewerAgent":
+        credential = DefaultAzureCredential()
+        conn_str = os.getenv("PROJECT_CONNECTION_STRING")
+        domain_id = os.getenv("DOMAIN_AGENT_ID")
+        summarizer_id = os.getenv("SUMMARIZER_AGENT_ID")
+
+        if not conn_str or not domain_id or not summarizer_id:
+            raise ValueError("Missing required environment variables.")
+
+        project_client = AIProjectClient.from_connection_string(credential=credential, conn_str=conn_str)
+
+        domain_def = await project_client.agents.get_agent(agent_id=domain_id)
+        summarizer_def = await project_client.agents.get_agent(agent_id=summarizer_id)
+
+        domain_agent = AzureAIAgent(client=project_client, definition=domain_def, name="DomainAgent")
+        summarizer_agent = AzureAIAgent(client=project_client, definition=summarizer_def, name="SummarizerAgent")
+
+        kernel = get_kernel()
+
+        selection = build_selection_strategy(kernel, [domain_agent, summarizer_agent])
+        termination = build_termination_strategy(kernel, [summarizer_agent])
+
+        chat = AgentGroupChat(
+            agents=[domain_agent, summarizer_agent],
+            selection_strategy=selection,
+            termination_strategy=termination
+        )
+
+        return cls(project_client=project_client, agent_group=chat)
+
+    async def process_message(self, message: str, previous_history: Optional[List[dict]] = None) -> ReviewResponse:
+        # ✅ Load previous messages if given
+        if previous_history:
+            for msg in previous_history:
+                self.agent_group.add_chat_message(role=msg["role"], message=msg["content"])
+
+        # ➕ Add new user message
+        await self.agent_group.add_chat_message(message=message)
+
+        responses = []
+        async for response in self.agent_group.invoke():
+            responses.append(AgentMessage(agent=response.agent.name, message=response.content))
+
+        final_message = self.agent_group.history.messages[-1].content
+
+        # ✅ Return full history
+        history = [
+            {"role": m.role, "content": m.content}
+            for m in self.agent_group.history.messages
+        ]
+
+        return ReviewResponse(
+            message=final_message,
+            status="success",
+            all_responses=responses,
+            history=history
+        )
